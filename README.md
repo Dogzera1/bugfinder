@@ -299,3 +299,4 @@ src/bugfinder/
 - O cálculo de ROI usa modelo simplificado (taxa fixa + frete fixo) — **piso** de margem; tributação não está contemplada.
 - Decisões de compra/revenda são responsabilidade do operador.
 - Em erros de digitação grosseiros (ex: produto a 5% do valor), o seller costuma cancelar — o detector limita por `discount_pct ≤ 80%` no comportamento padrão; ajuste se quiser.
+"# bugfinder" 
