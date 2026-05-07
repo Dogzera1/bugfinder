@@ -1,0 +1,11 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "bugfinder watch"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# Volume persistente pra o SQLite e o cache de token ML.
+# Configurar via dashboard Railway: New Volume → mount path /data.

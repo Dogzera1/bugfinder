@@ -1,0 +1,37 @@
+# Não copiar pro container
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# State local — Railway usa volume
+data/
+*.db
+*.db-journal
+*.csv
+
+# Secrets — Railway usa env vars
+.env
+.env.*
+!.env.example
+
+# Dev tooling
+.git/
+.github/
+.vscode/
+.idea/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Scripts de probe / scratch
+scripts/
+
+# Outros
+.DS_Store
+Thumbs.db
+*.log

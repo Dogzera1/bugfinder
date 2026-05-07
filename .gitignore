@@ -1,0 +1,27 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+.env
+.env.*
+!.env.example
+
+# Tudo em data/ é estado local — Railway usa volume persistente
+data/*
+!data/.gitkeep
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+*.egg-info/
+dist/
+build/
+
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
