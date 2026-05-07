@@ -10,7 +10,10 @@ dependencies = [
     "rich>=13.7",
     "python-dotenv>=1.0",
     "tenacity>=8.2",
-    "playwright>=1.40",
+    # Pin pra bater com a versão do Chromium na imagem Dockerfile
+    # (mcr.microsoft.com/playwright/python:v1.50.0-noble).
+    # Se atualizar a imagem, atualize aqui também.
+    "playwright>=1.50,<1.51",
 ]
 
 [project.optional-dependencies]

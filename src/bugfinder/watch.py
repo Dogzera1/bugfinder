@@ -97,6 +97,16 @@ def watch(opts: WatchOptions) -> None:
 
 def _do_cycle(opts: WatchOptions, storage: Storage,
               notifier: TelegramNotifier) -> None:
+    # callback que loga eventos importantes (não tudo)
+    def progress(stage: str, info: dict):
+        if stage == "source_done" and info.get("error"):
+            console.print(f"  [red]✗[/red] {info['source']}: {info['error']}")
+        elif stage == "enrich_started" and not info.get("active"):
+            console.print(
+                f"  [yellow]⚠ ML lookup inativo:[/yellow] "
+                f"{info.get('init_error') or 'desconhecido'}"
+            )
+
     result = run_scan(
         sources=opts.sources,
         query=opts.query,
@@ -105,11 +115,17 @@ def _do_cycle(opts: WatchOptions, storage: Storage,
         enrich_ml=True,
         config=CONFIG,
         storage=storage,
-        on_progress=None,  # silencioso no loop
+        on_progress=progress,
     )
+    es = result.enrich_stats or {}
     console.print(
         f"  scan #{result.scan_id}: {len(result.offers)} ofertas, "
-        f"{len(result.candidates)} candidatos"
+        f"{len(result.candidates)} candidatos | "
+        f"ML: {es.get('n_with_ref', 0)} ref, "
+        f"{es.get('n_profitable', 0)} lucrativos, "
+        f"{es.get('errors', 0)} erros"
+        + (f" | skip: {es['skipped_reason']}"
+           if es.get("skipped_reason") else "")
     )
 
     rows = storage.list_unnotified(

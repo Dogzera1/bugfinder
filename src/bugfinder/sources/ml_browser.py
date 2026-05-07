@@ -112,9 +112,17 @@ class MercadoLivreBrowser:
 
     def __enter__(self) -> "MercadoLivreBrowser":
         self._pw = sync_playwright().start()
+        # Flags Linux/Docker-friendly + anti-detection.
+        # --no-sandbox: necessário em Docker sem --privileged
+        # --disable-dev-shm-usage: evita crash em /dev/shm pequeno (Railway/Docker)
         self._browser = self._pw.chromium.launch(
             headless=self.headless,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-gpu",
+            ],
         )
         self._context = self._browser.new_context(
             viewport={"width": self.viewport[0], "height": self.viewport[1]},
