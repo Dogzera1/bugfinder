@@ -112,9 +112,6 @@ class MercadoLivreBrowser:
 
     def __enter__(self) -> "MercadoLivreBrowser":
         self._pw = sync_playwright().start()
-        # Flags Linux/Docker-friendly + anti-detection.
-        # --no-sandbox: necessário em Docker sem --privileged
-        # --disable-dev-shm-usage: evita crash em /dev/shm pequeno (Railway/Docker)
         self._browser = self._pw.chromium.launch(
             headless=self.headless,
             args=[
@@ -124,13 +121,47 @@ class MercadoLivreBrowser:
                 "--disable-gpu",
             ],
         )
+        # Localização forçada pra Brasil — ML faz geo-redirect em IPs cloud.
         self._context = self._browser.new_context(
             viewport={"width": self.viewport[0], "height": self.viewport[1]},
             locale="pt-BR",
+            timezone_id="America/Sao_Paulo",
+            geolocation={"latitude": -23.5505, "longitude": -46.6333},
+            permissions=["geolocation"],
             user_agent=UA,
-            extra_http_headers={"Accept-Language": "pt-BR,pt;q=0.9,en;q=0.5"},
+            extra_http_headers={
+                "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.5",
+            },
         )
+        # Warmup: visita homepage MLB pra setar os cookies de país.
+        # Sem isso, lista.mercadolivre.com.br pode servir a versão internacional
+        # (title="Mercado Libre") em vez da brasileira ("Mercado Livre").
+        self._do_warmup()
         return self
+
+    def _do_warmup(self) -> None:
+        page = self._context.new_page()
+        try:
+            page.goto("https://www.mercadolivre.com.br/",
+                      wait_until="domcontentloaded", timeout=20000)
+            # se aparecer interstitial de seleção de país, clica em Brasil
+            try:
+                btn = page.locator(
+                    "a[href*='mercadolivre.com.br'], "
+                    "button:has-text('Brasil'), a:has-text('Brasil')"
+                ).first
+                if btn.count():
+                    btn.click(timeout=2000)
+                    page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            t = page.title() or ""
+            print(f"[ml_browser] warmup title={t!r}", flush=True)
+        except Exception as e:
+            print(f"[ml_browser] warmup falhou: {type(e).__name__}: {e}",
+                  flush=True)
+        finally:
+            page.close()
 
     def __exit__(self, *exc) -> None:
         self.close()
@@ -200,19 +231,23 @@ class MercadoLivreBrowser:
                 pass
 
             if not cards_found:
-                # diagnóstico: a página carregou mas não tem nossos selectors.
-                # Tipicamente é o "stub" anti-bot do ML servido em IPs de
-                # datacenter / cloud.
                 try:
                     p_title = page.title()
                     body = page.content()
                 except Exception:
                     p_title, body = "?", ""
-                # detecta o stub: 'micro-landing' ou tamanho muito pequeno
                 stub = ("micro-landing" in body) or (len(body) < 8000)
+                # 'Mercado Libre' (sem v) = versão internacional/AR/MX.
+                # 'Mercado Livre' (com v) = BR.
+                is_intl = "mercado libre" in p_title.lower() \
+                          and "livre" not in p_title.lower()
+                # log primeiro snippet do body pra entender o que veio
+                body_head = body[:400].replace("\n", " ").replace("  ", " ")
                 print(
                     f"[ml_browser] no cards q={query!r} "
-                    f"title={p_title!r} body_len={len(body)} stub={stub}",
+                    f"title={p_title!r} body_len={len(body)} "
+                    f"stub={stub} intl_redirect={is_intl}\n"
+                    f"  body_head={body_head!r}",
                     flush=True,
                 )
                 return None
