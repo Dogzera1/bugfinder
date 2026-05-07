@@ -188,11 +188,33 @@ class MercadoLivreBrowser:
             try:
                 page.goto(url, wait_until="domcontentloaded",
                           timeout=self.timeout_ms)
-            except Exception:
+            except Exception as e:
+                print(f"[ml_browser] goto fail q={query!r}: {e}", flush=True)
                 return None
+
+            cards_found = False
             try:
                 page.wait_for_selector(CARD_SELECTOR, timeout=self.timeout_ms)
+                cards_found = True
             except Exception:
+                pass
+
+            if not cards_found:
+                # diagnóstico: a página carregou mas não tem nossos selectors.
+                # Tipicamente é o "stub" anti-bot do ML servido em IPs de
+                # datacenter / cloud.
+                try:
+                    p_title = page.title()
+                    body = page.content()
+                except Exception:
+                    p_title, body = "?", ""
+                # detecta o stub: 'micro-landing' ou tamanho muito pequeno
+                stub = ("micro-landing" in body) or (len(body) < 8000)
+                print(
+                    f"[ml_browser] no cards q={query!r} "
+                    f"title={p_title!r} body_len={len(body)} stub={stub}",
+                    flush=True,
+                )
                 return None
 
             cards = page.locator(CARD_SELECTOR).all()[:top_n]
@@ -243,6 +265,14 @@ class MercadoLivreBrowser:
                 accepted = raw_results
 
             if len(accepted) < min_matches:
+                # diagnóstico: cards existem mas validação cortou tudo
+                sample_titles = [r["title"][:50] for r in raw_results[:3]]
+                print(
+                    f"[ml_browser] q={query!r}: "
+                    f"raw={len(raw_results)} accepted={len(accepted)} "
+                    f"sample={sample_titles}",
+                    flush=True,
+                )
                 return None
 
             prices_sorted = sorted(r["price"] for r in accepted)
