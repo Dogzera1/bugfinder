@@ -63,15 +63,19 @@ class Enricher:
         headless_env = os.getenv("PLAYWRIGHT_HEADLESS", "1").lower()
         headless = headless_env not in ("0", "false", "no")
 
+        print("[enricher] launching chromium...", flush=True)
         try:
             self._ml = MercadoLivreBrowser(headless=headless)
             self._ml.__enter__()
+            print("[enricher] chromium ready.", flush=True)
         except Exception as e:
+            import traceback
             self._ml = None
             self._init_error = (
-                f"Playwright/Chromium não disponível: {type(e).__name__}: {e}. "
-                "Rode: .venv\\Scripts\\python.exe -m playwright install chromium"
+                f"Playwright/Chromium não disponível: {type(e).__name__}: {e}"
             )
+            print(f"[enricher] init failed: {self._init_error}", flush=True)
+            traceback.print_exc()
 
     @property
     def is_active(self) -> bool:
@@ -107,7 +111,15 @@ class Enricher:
                 stats["n_total"] += 1
             return out, stats
 
-        for c in candidates:
+        # Limita enrichment pra evitar OOM/timeouts em deploys com pouca RAM
+        # (cada lookup abre uma página chromium).
+        max_enrich = int(os.getenv("MAX_ENRICH_PER_CYCLE", "20"))
+        cand_list = list(candidates)
+        cand_list.sort(key=lambda c: c.score, reverse=True)
+        to_enrich = cand_list[:max_enrich]
+        to_skip = cand_list[max_enrich:]
+
+        for i, c in enumerate(to_enrich):
             stats["n_total"] += 1
             ref: MarketReference | None = None
             try:
@@ -122,8 +134,10 @@ class Enricher:
                     )
                     if raw:
                         ref = MarketReference(**raw)
-            except Exception:
+            except Exception as e:
                 stats["errors"] += 1
+                print(f"[enricher] erro #{i}: {type(e).__name__}: {e}",
+                      flush=True)
 
             via = None
             if ref is not None and ref.median > 0:
@@ -143,5 +157,12 @@ class Enricher:
                 "market_reference": ref,
                 "viability": via,
             }))
+
+        # candidatos pulados por max_enrich entram sem reference/viability
+        for c in to_skip:
+            stats["n_total"] += 1
+            out.append(c)
+        if to_skip:
+            stats["skipped_by_cap"] = len(to_skip)
 
         return out, stats

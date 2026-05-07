@@ -85,21 +85,34 @@ def run_scan(
     if all_offers:
         storage.upsert_offers(all_offers)
 
+    print(f"[scan] coletadas {len(all_offers)} ofertas, "
+          f"detectando candidatos...", flush=True)
     candidates = detect_candidates(all_offers, config)
+    print(f"[scan] {len(candidates)} candidatos detectados", flush=True)
 
     # Enrichment ML (Fase 2)
     enrich_stats: dict = {}
     if enrich_ml and candidates:
-        with Enricher(config) as enr:
-            if on_progress:
-                on_progress("enrich_started", {
-                    "active": enr.is_active,
-                    "init_error": enr.init_error,
-                    "n_candidates": len(candidates),
-                })
-            candidates, enrich_stats = enr.enrich(candidates)
-            if on_progress:
-                on_progress("enrich_done", enrich_stats)
+        print(f"[scan] iniciando enrichment ML em "
+              f"{len(candidates)} candidatos...", flush=True)
+        try:
+            with Enricher(config) as enr:
+                if on_progress:
+                    on_progress("enrich_started", {
+                        "active": enr.is_active,
+                        "init_error": enr.init_error,
+                        "n_candidates": len(candidates),
+                    })
+                candidates, enrich_stats = enr.enrich(candidates)
+                if on_progress:
+                    on_progress("enrich_done", enrich_stats)
+        except Exception as e:
+            import traceback
+            print(f"[scan] enrichment falhou: {type(e).__name__}: {e}",
+                  flush=True)
+            traceback.print_exc()
+            enrich_stats = {"skipped_reason": f"crash: {e}"}
+        print(f"[scan] enrichment concluído: {enrich_stats}", flush=True)
 
     # Filtro pós-enrichment por ROI mínimo (se configurado)
     if config.min_roi_pct > 0:
