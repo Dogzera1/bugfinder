@@ -102,25 +102,32 @@ class MercadoLivreBrowser:
     """
 
     def __init__(self, *, headless: bool = True, timeout_ms: int = 15000,
-                 viewport: tuple[int, int] = (1280, 900)) -> None:
+                 viewport: tuple[int, int] = (1280, 900),
+                 proxy: dict[str, str] | None = None) -> None:
         self.headless = headless
         self.timeout_ms = timeout_ms
         self.viewport = viewport
+        self.proxy = proxy
         self._pw = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
 
     def __enter__(self) -> "MercadoLivreBrowser":
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(
-            headless=self.headless,
-            args=[
+        launch_kwargs = {
+            "headless": self.headless,
+            "args": [
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-gpu",
             ],
-        )
+        }
+        if self.proxy:
+            launch_kwargs["proxy"] = self.proxy
+            print(f"[ml_browser] using proxy: "
+                  f"{self.proxy.get('server', '?')}", flush=True)
+        self._browser = self._pw.chromium.launch(**launch_kwargs)
         # Localização forçada pra Brasil — ML faz geo-redirect em IPs cloud.
         self._context = self._browser.new_context(
             viewport={"width": self.viewport[0], "height": self.viewport[1]},

@@ -63,9 +63,13 @@ class Enricher:
         headless_env = os.getenv("PLAYWRIGHT_HEADLESS", "1").lower()
         headless = headless_env not in ("0", "false", "no")
 
+        # Proxy opcional pra contornar bot detection do ML em IPs cloud.
+        # Configure PROXY_SERVER (+ user/pass se autenticado).
+        proxy_cfg = self._build_proxy_config()
+
         print("[enricher] launching chromium...", flush=True)
         try:
-            self._ml = MercadoLivreBrowser(headless=headless)
+            self._ml = MercadoLivreBrowser(headless=headless, proxy=proxy_cfg)
             self._ml.__enter__()
             print("[enricher] chromium ready.", flush=True)
         except Exception as e:
@@ -76,6 +80,18 @@ class Enricher:
             )
             print(f"[enricher] init failed: {self._init_error}", flush=True)
             traceback.print_exc()
+
+    @staticmethod
+    def _build_proxy_config() -> dict[str, str] | None:
+        server = os.getenv("PROXY_SERVER")
+        if not server:
+            return None
+        cfg: dict[str, str] = {"server": server}
+        if u := os.getenv("PROXY_USERNAME"):
+            cfg["username"] = u
+        if p := os.getenv("PROXY_PASSWORD"):
+            cfg["password"] = p
+        return cfg
 
     @property
     def is_active(self) -> bool:
