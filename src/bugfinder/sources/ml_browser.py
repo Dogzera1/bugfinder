@@ -133,6 +133,29 @@ class MercadoLivreBrowser:
                 "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.5",
             },
         )
+        # Stealth: esconde sinais de automação que o ML usa pra detectar bot
+        # (navigator.webdriver, plugins.length, languages, etc.)
+        self._context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [
+                    {name: 'Chrome PDF Plugin'},
+                    {name: 'Chrome PDF Viewer'},
+                    {name: 'Native Client'}
+                ]
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['pt-BR', 'pt', 'en']
+            });
+            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+            window.chrome = { runtime: {} };
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (p) => (
+                p.name === 'notifications'
+                    ? Promise.resolve({state: Notification.permission})
+                    : originalQuery(p)
+            );
+        """)
         # Warmup: visita homepage MLB pra setar os cookies de país.
         # Sem isso, lista.mercadolivre.com.br pode servir a versão internacional
         # (title="Mercado Libre") em vez da brasileira ("Mercado Livre").

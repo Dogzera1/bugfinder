@@ -53,6 +53,15 @@ class Config:
     freight_sell: float = _float("FREIGHT_SELL", 20.0)
     min_roi_pct: float = _float("MIN_ROI_PCT", 0.0)  # filtro pós-enrichment
 
+    # --- Modo de operação ---
+    # ENABLE_ML_LOOKUP=0 desliga o enricher (útil em cloud onde ML bloqueia
+    # bot). Sem ML, notificação cai pra modo "discount-only".
+    enable_ml_lookup: bool = (
+        os.getenv("ENABLE_ML_LOOKUP", "1").lower() not in ("0", "false", "no")
+    )
+    # Discount % mínimo pra notificar quando ML lookup está off
+    min_discount_pct_notify: float = _float("MIN_DISCOUNT_PCT_NOTIFY", 35.0)
+
     # --- Telegram (Fase 5) ---
     telegram_bot_token: str | None = os.getenv("TELEGRAM_BOT_TOKEN") or None
     telegram_chat_id: str | None = os.getenv("TELEGRAM_CHAT_ID") or None

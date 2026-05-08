@@ -90,9 +90,16 @@ def run_scan(
     candidates = detect_candidates(all_offers, config)
     print(f"[scan] {len(candidates)} candidatos detectados", flush=True)
 
-    # Enrichment ML (Fase 2)
+    # Enrichment ML (Fase 2). Pode ser desligado via env var pra cloud
+    # onde ML bloqueia bot — aí notificação vira discount-only.
     enrich_stats: dict = {}
-    if enrich_ml and candidates:
+    skip_ml = enrich_ml and not config.enable_ml_lookup
+    if skip_ml:
+        print("[scan] enrichment ML desabilitado via ENABLE_ML_LOOKUP=0",
+              flush=True)
+        enrich_stats = {"skipped_reason": "ENABLE_ML_LOOKUP=0",
+                        "n_total": len(candidates)}
+    elif enrich_ml and candidates:
         print(f"[scan] iniciando enrichment ML em "
               f"{len(candidates)} candidatos...", flush=True)
         try:

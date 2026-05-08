@@ -128,12 +128,22 @@ def _do_cycle(opts: WatchOptions, storage: Storage,
            if es.get("skipped_reason") else "")
     )
 
-    rows = storage.list_unnotified(
-        min_roi_pct=opts.min_roi_pct,
-        min_match_confidence=opts.min_match_confidence,
-        require_viability=opts.notify_only_with_roi,
-        limit=opts.max_notifications_per_cycle,
-    )
+    # Em modo "ML desligado", filtra por discount em vez de ROI
+    if not CONFIG.enable_ml_lookup:
+        rows = storage.list_unnotified(
+            min_discount_pct=CONFIG.min_discount_pct_notify,
+            require_viability=False,
+            min_roi_pct=None,
+            min_match_confidence=None,
+            limit=opts.max_notifications_per_cycle,
+        )
+    else:
+        rows = storage.list_unnotified(
+            min_roi_pct=opts.min_roi_pct,
+            min_match_confidence=opts.min_match_confidence,
+            require_viability=opts.notify_only_with_roi,
+            limit=opts.max_notifications_per_cycle,
+        )
     if not rows:
         console.print("  nada novo pra notificar.")
         return

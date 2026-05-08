@@ -301,11 +301,13 @@ class Storage:
 
     def list_unnotified(self, *, min_roi_pct: float | None = None,
                         min_match_confidence: float | None = None,
+                        min_discount_pct: float | None = None,
                         require_viability: bool = True,
                         limit: int = 50) -> list[sqlite3.Row]:
         """
         Candidatos ainda não notificados via Telegram.
-        Filtros: ROI mínimo, match confidence mínimo, exige cálculo de viabilidade.
+        Filtros: ROI mínimo, match confidence mínimo, desconto mínimo (fallback
+        sem ROI), exige cálculo de viabilidade.
         Deduplica por (source, external_id) — só o mais recente.
         """
         sql = """
@@ -328,6 +330,9 @@ class Storage:
         if min_match_confidence is not None:
             sql += " AND (c.ml_match_confidence IS NULL OR c.ml_match_confidence >= ?)"
             params.append(min_match_confidence)
+        if min_discount_pct is not None:
+            sql += " AND c.discount_pct >= ?"
+            params.append(min_discount_pct)
         # Garante que cada (source, external_id) aparece só uma vez (o mais recente)
         sql += """
             AND c.id IN (
