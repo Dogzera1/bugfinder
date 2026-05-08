@@ -264,6 +264,9 @@ class Storage:
                         status: str | None = None,
                         source: str | None = None,
                         top: int = 50) -> list[sqlite3.Row]:
+        # Dedup persistente por (source, external_id): exclui ofertas que JÁ
+        # foram notificadas em qualquer scan anterior, independente do
+        # candidate_id atual. Cada nova oferta avisa só uma vez na vida.
         sql = """
             SELECT c.id, c.scan_id, c.score, c.discount_pct, c.reasons_json,
                    c.status, c.ts,
@@ -276,6 +279,12 @@ class Storage:
             FROM candidates c
             JOIN offers o ON o.source = c.source AND o.external_id = c.external_id
             WHERE 1=1
+              AND NOT EXISTS (
+                  SELECT 1 FROM candidates cprev
+                  WHERE cprev.source = c.source
+                    AND cprev.external_id = c.external_id
+                    AND cprev.notified_at IS NOT NULL
+              )
         """
         params: list = []
         if scan_id is not None:
@@ -348,6 +357,12 @@ class Storage:
             return list(conn.execute(sql, params).fetchall())
 
     def mark_notified(self, candidate_ids: list[int]) -> None:
+        """
+        Marca os candidates específicos como notificados. Combinado com o
+        filtro NOT EXISTS em list_unnotified, isso é suficiente: scans futuros
+        que criem novos candidate_ids pra mesma oferta são naturalmente
+        excluídos pela presença desses candidatos antigos com notified_at.
+        """
         if not candidate_ids:
             return
         ts = _now_iso()
@@ -356,3 +371,17 @@ class Storage:
                 "UPDATE candidates SET notified_at = ? WHERE id = ?",
                 [(ts, cid) for cid in candidate_ids],
             )
+
+    def reset_notified(self, *, source: str | None = None) -> int:
+        """Limpa flag notified_at — útil pra re-testar ou após mudança grande."""
+        with self.transaction() as conn:
+            if source:
+                cur = conn.execute(
+                    "UPDATE candidates SET notified_at = NULL WHERE source = ?",
+                    (source,),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE candidates SET notified_at = NULL"
+                )
+            return cur.rowcount

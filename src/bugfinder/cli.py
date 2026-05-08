@@ -328,6 +328,14 @@ def cmd_ml_auth(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reset_notifications(args: argparse.Namespace) -> int:
+    storage = Storage(CONFIG.db_full_path)
+    n = storage.reset_notified(source=args.source)
+    console.print(f"[green]✓ {n} candidatos zerados[/green] — vão ser "
+                  f"reenviados no próximo ciclo.")
+    return 0
+
+
 def cmd_mark(args: argparse.Namespace) -> int:
     valid = {"new", "seen", "bought", "ignored"}
     if args.status not in valid:
@@ -528,6 +536,11 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("candidate_id", type=int)
     m.add_argument("status")
     m.set_defaults(func=cmd_mark)
+
+    rn = sub.add_parser("reset-notifications",
+                        help="limpa notified_at — reenvia tudo no próximo ciclo")
+    rn.add_argument("--source", help="só zera dessa source (default: todas)")
+    rn.set_defaults(func=cmd_reset_notifications)
 
     src = sub.add_parser("sources", help="lista sources disponíveis")
     src.set_defaults(func=cmd_sources)
