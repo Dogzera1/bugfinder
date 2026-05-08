@@ -1,4 +1,4 @@
-"""
+r"""
 Loop de scans periódicos com notificação Telegram.
 
 Roda foreground (Ctrl+C pra parar). Pra manter em background no Windows
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from rich.console import Console
 
 from .config import CONFIG
-from .notifier import TelegramConfigError, TelegramNotifier
+from .notifier import TelegramConfigError, TelegramNotifier, drain_callbacks
 from .scanner import run_scan
 from .storage import Storage
 
@@ -66,6 +66,21 @@ def watch(opts: WatchOptions) -> None:
     console.print(f"[bold]watch[/bold] iniciado — intervalo {opts.interval_min}min, "
                   f"ROI mínimo {opts.min_roi_pct:.0f}%, "
                   f"match ≥ {opts.min_match_confidence:.0%}")
+
+    offset_path = CONFIG.data_dir / ".tg_offset.json"
+
+    def _on_callback(stage, info):
+        if stage == "callback_applied":
+            console.print(
+                f"  📲 callback: candidate#{info['candidate_id']} → "
+                f"[bold]{info['status']}[/bold]"
+            )
+        elif stage == "error":
+            console.print(
+                f"  [red]callback erro:[/red] candidate#{info['candidate_id']}: "
+                f"{info['error']}"
+            )
+
     cycle = 0
     try:
         while not _stop_requested:
@@ -75,6 +90,18 @@ def watch(opts: WatchOptions) -> None:
                 f"\n[cyan]ciclo {cycle}[/cyan] — "
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')}"
             )
+            # Drena callbacks acumulados desde o último ciclo
+            try:
+                n = drain_callbacks(
+                    notifier=notifier, storage=storage,
+                    offset_path=offset_path, long_poll_timeout=0,
+                    on_event=_on_callback,
+                )
+                if n:
+                    console.print(f"  {n} interaç{'ão' if n == 1 else 'ões'} aplicada{'' if n == 1 else 's'}")
+            except Exception as e:
+                console.print(f"  [yellow]drain callbacks falhou:[/yellow] {e}")
+
             try:
                 _do_cycle(opts, storage, notifier)
             except Exception:
@@ -85,11 +112,23 @@ def watch(opts: WatchOptions) -> None:
             wait = max(0, opts.interval_min * 60 - elapsed)
             console.print(f"  ciclo terminou em {elapsed:.0f}s, "
                           f"próximo em {wait:.0f}s")
-            # dorme em pedaços pra responder ao Ctrl+C rápido
-            for _ in range(int(wait)):
-                if _stop_requested:
-                    break
+            # Espera reativa: a cada 30s drena callbacks pra UX < 30s,
+            # respondendo rápido ao Ctrl+C também.
+            slept = 0
+            while slept < wait and not _stop_requested:
                 time.sleep(1)
+                slept += 1
+                if slept % 30 == 0:
+                    try:
+                        n = drain_callbacks(
+                            notifier=notifier, storage=storage,
+                            offset_path=offset_path, long_poll_timeout=0,
+                            on_event=_on_callback,
+                        )
+                        if n:
+                            console.print(f"  {n} interaç{'ão' if n == 1 else 'ões'} aplicada{'' if n == 1 else 's'} (entre ciclos)")
+                    except Exception:
+                        pass
     finally:
         notifier.close()
         console.print("[bold]watch encerrado.[/bold]")

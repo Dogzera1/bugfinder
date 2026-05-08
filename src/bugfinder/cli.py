@@ -221,6 +221,14 @@ def cmd_telegram_test(args: argparse.Namespace) -> int:
         with TelegramNotifier(CONFIG.telegram_bot_token,
                               CONFIG.telegram_chat_id) as tg:
             tg.send_test()
+            if args.with_buttons:
+                # Envia uma mensagem fake com botões pra testar callback round-trip.
+                tg.send_text(
+                    "🧪 *Teste de botões*\n"
+                    "Use os botões abaixo \\(candidate id `0` é fictício, "
+                    "vai dar erro ao salvar — só pra ver o spinner sumir\\)\\.",
+                    reply_markup=tg._build_action_keyboard(0),
+                )
     except TelegramConfigError as e:
         console.print(f"[red]Erro de config:[/red] {e}")
         return 1
@@ -228,6 +236,38 @@ def cmd_telegram_test(args: argparse.Namespace) -> int:
         console.print(f"[red]Falha ao enviar:[/red] {e}")
         return 1
     console.print("[green]✓ mensagem enviada[/green] — confere o seu Telegram.")
+    return 0
+
+
+def cmd_tg_pull(args: argparse.Namespace) -> int:
+    """Drena callbacks pendentes do Telegram uma vez. Útil pra rodar fora do watch."""
+    from .notifier import TelegramConfigError, TelegramNotifier, drain_callbacks
+    storage = Storage(CONFIG.db_full_path)
+    offset_path = CONFIG.data_dir / ".tg_offset.json"
+
+    def _on(stage, info):
+        if stage == "callback_applied":
+            console.print(
+                f"  📲 candidate#{info['candidate_id']} → "
+                f"[bold]{info['status']}[/bold]"
+            )
+        elif stage == "error":
+            console.print(
+                f"  [red]erro:[/red] candidate#{info['candidate_id']}: "
+                f"{info['error']}"
+            )
+
+    try:
+        with TelegramNotifier(CONFIG.telegram_bot_token,
+                              CONFIG.telegram_chat_id) as tg:
+            n = drain_callbacks(
+                notifier=tg, storage=storage, offset_path=offset_path,
+                long_poll_timeout=args.timeout, on_event=_on,
+            )
+    except TelegramConfigError as e:
+        console.print(f"[red]Erro de config:[/red] {e}")
+        return 1
+    console.print(f"[green]✓ {n} callback(s) processado(s)[/green]")
     return 0
 
 
@@ -555,7 +595,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     tt = sub.add_parser("telegram-test",
                         help="envia mensagem de teste pro seu Telegram")
+    tt.add_argument("--with-buttons", action="store_true",
+                    help="manda também uma msg com botões pra testar inline keyboard")
     tt.set_defaults(func=cmd_telegram_test)
+
+    tp = sub.add_parser("tg-pull",
+                        help="drena callbacks pendentes (cliques nos botões) "
+                             "e atualiza status no DB")
+    tp.add_argument("--timeout", type=int, default=0,
+                    help="long poll em segundos (0 = retorna imediato)")
+    tp.set_defaults(func=cmd_tg_pull)
 
     ti = sub.add_parser("ml-token-info",
                         help="mostra refresh_token cacheado (pra seed Railway)")

@@ -46,6 +46,14 @@ def _escape_md(s: str) -> str:
     return "".join(out)
 
 
+# Mapa entre callback_data prefix e (status_no_db, label_humano)
+CALLBACK_ACTIONS: dict[str, tuple[str, str]] = {
+    "buy":    ("bought",  "comprei"),
+    "seen":   ("seen",    "visto"),
+    "ign":    ("ignored", "ignorado"),
+}
+
+
 class TelegramNotifier:
     BASE = "https://api.telegram.org"
 
@@ -71,28 +79,44 @@ class TelegramNotifier:
 
     # ---- API ----
 
+    def _api(self, method: str, payload: dict, *, timeout: float | None = None) -> dict:
+        url = f"{self.BASE}/bot{self.bot_token}/{method}"
+        r = self._client.post(url, json=payload, timeout=timeout or self._client.timeout)
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"Telegram {method} falhou ({r.status_code}): {r.text[:300]}"
+            )
+        return r.json()
+
     def send_text(self, text: str, *, parse_mode: str = "MarkdownV2",
-                  disable_preview: bool = True) -> dict:
-        url = f"{self.BASE}/bot{self.bot_token}/sendMessage"
-        r = self._client.post(url, json={
+                  disable_preview: bool = True,
+                  reply_markup: dict | None = None) -> dict:
+        payload = {
             "chat_id": self.chat_id,
             "text": text,
             "parse_mode": parse_mode,
             "disable_web_page_preview": disable_preview,
             "link_preview_options": {"is_disabled": disable_preview},
-        })
-        if r.status_code >= 400:
-            raise RuntimeError(
-                f"Telegram sendMessage falhou ({r.status_code}): "
-                f"{r.text[:300]}"
-            )
-        return r.json()
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._api("sendMessage", payload)
 
     def send_test(self) -> dict:
         return self.send_text(
             "🤖 *Bug Finder ativo* — notificações chegando aqui\\.",
             parse_mode="MarkdownV2",
         )
+
+    @staticmethod
+    def _build_action_keyboard(candidate_id: int) -> dict:
+        return {
+            "inline_keyboard": [[
+                {"text": "✅ Comprei",  "callback_data": f"buy:{candidate_id}"},
+                {"text": "👁 Visto",    "callback_data": f"seen:{candidate_id}"},
+                {"text": "🚫 Ignorar",  "callback_data": f"ign:{candidate_id}"},
+            ]]
+        }
 
     def send_candidate(self, c: sqlite3.Row) -> dict:
         """Mensagem rica pra um candidato (linha do storage.list_unnotified)."""
@@ -141,11 +165,42 @@ class TelegramNotifier:
             if match_conf is not None:
                 extra += f"  \\(match {match_conf*100:.0f}%\\)"
             lines.append(extra)
+
+        # Sinal de histórico — só aparece quando temos dados (>=2 pontos)
+        try:
+            hist_count = c["hist_count"]
+            hist_p50 = c["hist_p50"]
+            hist_min = c["hist_min"]
+            hist_outlier = c["hist_is_outlier"]
+        except (IndexError, KeyError):
+            hist_count = None
+            hist_p50 = hist_min = hist_outlier = None
+        if hist_count and hist_count >= 2:
+            if hist_outlier:
+                hist_line = (
+                    f"📉 *outlier histórico* "
+                    f"\\(mín {_escape_md(_fmt_brl(hist_min))} em "
+                    f"{hist_count} obs\\)"
+                )
+            elif hist_p50 and c["price"] >= hist_p50:
+                hist_line = (
+                    f"⚠️ preço {_escape_md(_fmt_brl(c['price']))} ≥ mediana "
+                    f"histórica \\({_escape_md(_fmt_brl(hist_p50))}, "
+                    f"{hist_count} obs\\) — old\\_price pode estar inflado"
+                )
+            else:
+                hist_line = (
+                    f"📊 histórico: mediana "
+                    f"{_escape_md(_fmt_brl(hist_p50))} em {hist_count} obs"
+                )
+            lines.append(hist_line)
+
         if coupon:
             lines.append(f"🎟 cupom: `{_escape_md(coupon)}`")
 
         text = "\n".join(lines)
-        return self.send_text(text)
+        markup = self._build_action_keyboard(int(c["id"]))
+        return self.send_text(text, reply_markup=markup)
 
     def send_candidates_batch(self, rows: Iterable[sqlite3.Row]) -> int:
         n = 0
@@ -157,3 +212,62 @@ class TelegramNotifier:
                 # não interrompe o lote por erro individual
                 continue
         return n
+
+    # ---- Callback handling (inline buttons) ----
+
+    def get_updates(self, *, offset: int | None = None,
+                    timeout: int = 0,
+                    allowed_updates: list[str] | None = None) -> list[dict]:
+        """
+        Long-polling de updates. timeout=0 = curto (sem long polling),
+        timeout>0 deixa o servidor segurar a conexão até chegar update.
+        Retorna a lista de updates crus.
+        """
+        payload = {"timeout": timeout}
+        if offset is not None:
+            payload["offset"] = offset
+        if allowed_updates is not None:
+            payload["allowed_updates"] = allowed_updates
+        # http timeout precisa ser maior que o long poll do Telegram
+        http_timeout = max(self._client.timeout.read or 15.0, timeout + 5)
+        data = self._api("getUpdates", payload, timeout=http_timeout)
+        return data.get("result") or []
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "",
+                              show_alert: bool = False) -> dict:
+        """Confirma o clique do botão (faz o spinner sumir no app)."""
+        return self._api("answerCallbackQuery", {
+            "callback_query_id": callback_query_id,
+            "text": text,
+            "show_alert": show_alert,
+        })
+
+    def edit_message_reply_markup(self, *, chat_id: int | str,
+                                  message_id: int,
+                                  reply_markup: dict | None) -> dict:
+        """Edita só os botões (ou remove). Útil pra travar uma mensagem após ação."""
+        payload = {"chat_id": chat_id, "message_id": message_id}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._api("editMessageReplyMarkup", payload)
+
+    def edit_message_caption(self, *, chat_id: int | str, message_id: int,
+                             caption: str) -> dict:
+        return self._api("editMessageCaption", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "caption": caption,
+        })
+
+    def append_action_footer(self, *, chat_id: int | str, message_id: int,
+                             original_text: str, footer: str) -> dict:
+        """Edita texto da mensagem appendando um rodapé com a ação tomada."""
+        new_text = f"{original_text}\n\n{footer}"
+        return self._api("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": new_text,
+            "parse_mode": "MarkdownV2",
+            "disable_web_page_preview": True,
+            "link_preview_options": {"is_disabled": True},
+        })

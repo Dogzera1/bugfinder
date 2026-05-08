@@ -78,6 +78,22 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE INDEX IF NOT EXISTS idx_candidates_scan   ON candidates(scan_id);
 CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
 CREATE INDEX IF NOT EXISTS idx_candidates_score  ON candidates(score DESC);
+
+-- Histórico de preço por SKU. Uma linha por scan onde a offer foi vista.
+-- Permite detectar se o preço atual é outlier (P10) vs preço normalmente
+-- baixo (mediana já é esse valor → old_price é provavelmente inflado).
+CREATE TABLE IF NOT EXISTS price_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    source       TEXT    NOT NULL,
+    external_id  TEXT    NOT NULL,
+    price        REAL    NOT NULL,
+    ts           TEXT    NOT NULL,
+    scan_id      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_price_history_sku_ts
+    ON price_history(source, external_id, ts);
+CREATE INDEX IF NOT EXISTS idx_price_history_ts
+    ON price_history(ts);
 """
 
 # Migrações idempotentes pra DBs antigos — rodam ANTES do executescript
@@ -95,6 +111,11 @@ _MIGRATIONS = [
     "ALTER TABLE candidates ADD COLUMN via_margin_brl REAL",
     "ALTER TABLE candidates ADD COLUMN via_roi_pct REAL",
     "ALTER TABLE candidates ADD COLUMN notified_at TEXT",
+    "ALTER TABLE candidates ADD COLUMN hist_count INTEGER",
+    "ALTER TABLE candidates ADD COLUMN hist_p10 REAL",
+    "ALTER TABLE candidates ADD COLUMN hist_p50 REAL",
+    "ALTER TABLE candidates ADD COLUMN hist_min REAL",
+    "ALTER TABLE candidates ADD COLUMN hist_is_outlier INTEGER",
 ]
 
 # Índices que dependem de colunas adicionadas pelas migrações.
@@ -177,9 +198,12 @@ class Storage:
 
     # --- offers ---
 
-    def upsert_offers(self, offers: Iterable[Offer]) -> int:
+    def upsert_offers(self, offers: Iterable[Offer],
+                      *, scan_id: int | None = None) -> int:
         rows = []
+        history_rows = []
         now = _now_iso()
+        offers = list(offers)
         for o in offers:
             rows.append((
                 o.source, o.external_id, o.title, o.url, o.price, o.old_price,
@@ -189,6 +213,9 @@ class Storage:
                 json.dumps(o.metadata, ensure_ascii=False, default=str),
                 o.fetched_at.isoformat(timespec="seconds"),
                 now,
+            ))
+            history_rows.append((
+                o.source, o.external_id, o.price, now, scan_id,
             ))
         if not rows:
             return 0
@@ -219,7 +246,66 @@ class Storage:
                 """,
                 rows,
             )
+            conn.executemany(
+                """INSERT INTO price_history
+                       (source, external_id, price, ts, scan_id)
+                   VALUES (?, ?, ?, ?, ?)""",
+                history_rows,
+            )
         return len(rows)
+
+    # --- price history ---
+
+    def get_price_history(self, source: str, external_id: str,
+                          *, days: int = 30,
+                          limit: int = 500) -> list[float]:
+        """Retorna lista de preços históricos do SKU nos últimos `days`."""
+        from datetime import timedelta
+        since = (datetime.now(timezone.utc) - timedelta(days=days))\
+            .isoformat(timespec="seconds")
+        with self._connect() as conn:
+            return [r[0] for r in conn.execute(
+                """SELECT price FROM price_history
+                   WHERE source = ? AND external_id = ? AND ts >= ?
+                   ORDER BY ts DESC
+                   LIMIT ?""",
+                (source, external_id, since, limit),
+            ).fetchall()]
+
+    def get_price_stats_bulk(self, items: Iterable[tuple[str, str]],
+                             *, days: int = 30) -> dict[tuple[str, str], dict]:
+        """
+        Para cada (source, external_id), retorna dict com stats:
+          {p10, p25, p50, p75, count, min, max}
+        SKUs sem histórico (count<2) são omitidos do retorno.
+        """
+        out: dict[tuple[str, str], dict] = {}
+        for source, eid in items:
+            prices = self.get_price_history(source, eid, days=days)
+            if len(prices) < 2:
+                continue
+            sorted_p = sorted(prices)
+            n = len(sorted_p)
+
+            def pct(p):
+                # interpolação linear
+                k = (n - 1) * p
+                f = int(k)
+                c = min(f + 1, n - 1)
+                if f == c:
+                    return sorted_p[f]
+                return sorted_p[f] + (sorted_p[c] - sorted_p[f]) * (k - f)
+
+            out[(source, eid)] = {
+                "count": n,
+                "min": sorted_p[0],
+                "max": sorted_p[-1],
+                "p10": pct(0.10),
+                "p25": pct(0.25),
+                "p50": pct(0.50),
+                "p75": pct(0.75),
+            }
+        return out
 
     # --- candidates ---
 
@@ -229,6 +315,7 @@ class Storage:
         for c in candidates:
             mr = c.market_reference
             via = c.viability
+            h = c.history
             rows.append((
                 scan_id, c.offer.source, c.offer.external_id,
                 c.score, c.offer.discount_pct,
@@ -244,6 +331,11 @@ class Storage:
                 via.acquisition_cost if via else None,
                 via.margin_brl if via else None,
                 via.roi_pct if via else None,
+                h.count if h else None,
+                h.p10 if h else None,
+                h.p50 if h else None,
+                h.min if h else None,
+                int(h.is_outlier) if h else None,
             ))
         if not rows:
             return 0
@@ -254,8 +346,9 @@ class Storage:
                         reasons_json, ts,
                         ml_query, ml_median, ml_p25, ml_p75, ml_count, ml_search_url,
                         ml_match_confidence,
-                        via_sale_price, via_acquisition, via_margin_brl, via_roi_pct)
-                   VALUES (?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?)""",
+                        via_sale_price, via_acquisition, via_margin_brl, via_roi_pct,
+                        hist_count, hist_p10, hist_p50, hist_min, hist_is_outlier)
+                   VALUES (?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?)""",
                 rows,
             )
         return len(rows)
@@ -317,18 +410,30 @@ class Storage:
         Candidatos ainda não notificados via Telegram.
         Filtros: ROI mínimo, match confidence mínimo, desconto mínimo (fallback
         sem ROI), exige cálculo de viabilidade.
-        Deduplica por (source, external_id) — só o mais recente.
+
+        Dedup cross-scan por (source, external_id):
+          - exclui se algum candidate anterior já foi notificado
+          - exclui se algum candidate anterior tem status != 'new'
+            (o usuário já marcou bought/seen/ignored via botão ou CLI)
         """
         sql = """
             SELECT c.id, c.score, c.discount_pct, c.via_margin_brl, c.via_roi_pct,
                    c.via_sale_price, c.ml_search_url, c.ml_match_confidence,
                    c.ml_p25, c.ml_count,
+                   c.hist_count, c.hist_p10, c.hist_p50, c.hist_min, c.hist_is_outlier,
                    o.source, o.external_id, o.title, o.url, o.price, o.old_price,
                    o.store_name, o.coupon_code
             FROM candidates c
             JOIN offers o ON o.source = c.source AND o.external_id = c.external_id
             WHERE c.notified_at IS NULL
               AND c.status = 'new'
+              AND NOT EXISTS (
+                  SELECT 1 FROM candidates cprev
+                  WHERE cprev.source = c.source
+                    AND cprev.external_id = c.external_id
+                    AND (cprev.notified_at IS NOT NULL
+                         OR cprev.status != 'new')
+              )
         """
         params: list = []
         if require_viability:

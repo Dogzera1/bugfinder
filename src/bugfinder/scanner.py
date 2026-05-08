@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from .config import CONFIG, Config
 from .detector import detect_candidates
 from .enricher import Enricher
-from .models import Candidate, Offer
+from .models import Candidate, Offer, PriceHistoryStats
 from .sources import REGISTRY, get_source
 from .sources.base import SourceError
 from .storage import Storage
@@ -83,12 +83,17 @@ def run_scan(
             })
 
     if all_offers:
-        storage.upsert_offers(all_offers)
+        storage.upsert_offers(all_offers, scan_id=scan_id)
 
     print(f"[scan] coletadas {len(all_offers)} ofertas, "
           f"detectando candidatos...", flush=True)
     candidates = detect_candidates(all_offers, config)
     print(f"[scan] {len(candidates)} candidatos detectados", flush=True)
+
+    # Histórico de preço (Fase 4): anota stats no candidato + ajusta
+    # score quando preço atual é outlier baixo do próprio histórico.
+    if candidates:
+        _enrich_with_history(candidates, storage, on_progress=on_progress)
 
     # Enrichment ML (Fase 2). Pode ser desligado via env var pra cloud
     # onde ML bloqueia bot — aí notificação vira discount-only.
@@ -154,3 +159,68 @@ def run_scan(
         scan_id=scan_id, offers=all_offers, candidates=candidates,
         errors=errors, enrich_stats=enrich_stats,
     )
+
+
+def _enrich_with_history(
+    candidates: list[Candidate],
+    storage: Storage,
+    *,
+    days: int = 30,
+    min_count_outlier: int = 5,
+    on_progress=None,
+) -> None:
+    """
+    Anota PriceHistoryStats no candidato e ajusta o score conforme:
+      - Outlier baixo (preço atual <= P10 com count>=5): +0.10 e reason
+      - Preço normalmente baixo (atual >= P50 com count>=5): -0.05 e reason
+        ("old_price provavelmente inflado")
+    """
+    items = [(c.offer.source, c.offer.external_id) for c in candidates]
+    try:
+        stats_map = storage.get_price_stats_bulk(items, days=days)
+    except Exception as e:
+        print(f"[scan] history enrichment falhou: {e}", flush=True)
+        return
+
+    n_outlier = 0
+    n_normal_low = 0
+    for c in candidates:
+        key = (c.offer.source, c.offer.external_id)
+        s = stats_map.get(key)
+        if not s:
+            continue
+        is_outlier = (s["count"] >= min_count_outlier
+                      and c.offer.price <= s["p10"])
+        c.history = PriceHistoryStats(
+            count=s["count"],
+            min=s["min"],
+            max=s["max"],
+            p10=s["p10"],
+            p25=s["p25"],
+            p50=s["p50"],
+            p75=s["p75"],
+            is_outlier=is_outlier,
+        )
+        if is_outlier:
+            c.score = min(1.0, c.score + 0.10)
+            c.reasons.append(
+                f"outlier histórico: preço atual ≤ P10 dos últimos "
+                f"{days}d (n={s['count']})"
+            )
+            n_outlier += 1
+        elif (s["count"] >= min_count_outlier
+              and c.offer.price >= s["p50"]):
+            c.score = max(0.0, c.score - 0.05)
+            c.reasons.append(
+                f"preço atual já é mediano nos últimos {days}d "
+                f"(old_price pode estar inflado)"
+            )
+            n_normal_low += 1
+
+    candidates.sort(key=lambda c: c.score, reverse=True)
+    if on_progress:
+        on_progress("history_done", {
+            "n_with_history": sum(1 for c in candidates if c.history),
+            "n_outlier": n_outlier,
+            "n_normal_low": n_normal_low,
+        })

@@ -2,7 +2,7 @@
 
 Ferramenta para encontrar **ofertas com alto desconto em lojas brasileiras** e estimar **margem de revenda no Mercado Livre**. Coleta de múltiplas fontes, pontua por desconto + qualidade comunitária, busca preço de referência no ML, calcula ROI.
 
-## Status atual: Fase 5 — Telegram + scheduler 24/7
+## Status atual: Fase 6 — Botões inline + histórico de preço
 
 - [x] Arquitetura de **sources** plugáveis
 - [x] Source: **Promobit** (agrega Amazon, Magalu, Netshoes, KaBuM, Pichau, AliExpress…)
@@ -12,14 +12,17 @@ Ferramenta para encontrar **ofertas com alto desconto em lojas brasileiras** e e
 - [x] **Validação de match por overlap de tokens** (evita comparar Asics com Qix)
 - [x] **Calculadora de ROI**: margem estimada após taxa ML, frete absorvido
 - [x] **Notificador Telegram** com ROI colorizado e link clicável
-- [x] **Scheduler `watch`**: scans periódicos + dedup de candidatos já notificados
+- [x] **Botões inline no Telegram** — marcar comprei/visto/ignorar direto no chat
+- [x] **Histórico de preço por SKU** — detecta outlier real (P10 dos últimos 30d) e flag pra `old_price` inflado
+- [x] **Scheduler `watch`**: scans periódicos + dedup cross-scan + drain de callbacks
 - [x] OAuth2 ML (client_credentials + authorization_code + refresh_token)
 - [x] Persistência SQLite + export CSV
-- [x] CLI: scan, candidates, scans, mark, sources, ml-auth, telegram-test, watch
+- [x] CLI: scan, candidates, scans, mark, sources, ml-auth, telegram-test, tg-pull, watch
 
 ### Próximas fases
-- [ ] **Fase 3**: sources adicionais — Amazon BR, Magalu, Pelando, Casas Bahia
+- [ ] **Fase 3**: sources adicionais — Amazon BR direta, Magalu, Casas Bahia (precisa Playwright; agregadores comuns como Pelando/Bondfaro/Buscape são SPA ou comparadores sem `old_price`)
 - [ ] **Fase 4**: filtros — velocidade de venda, reputação seller, blocklist de categorias
+- [ ] **Hit-rate tracking**: quando marca `bought`, salvar preço real de venda → relatório de quais sources/categorias dão match
 
 ## Setup
 
@@ -142,6 +145,15 @@ bugfinder watch --sources promobit --query "notebook"
 
 Ctrl+C pra parar. Cada candidato é notificado uma única vez (`notified_at` no DB).
 
+#### Botões inline no Telegram
+
+Cada notificação vem com 3 botões: **✅ Comprei**, **👁 Visto**, **🚫 Ignorar**. Clicar:
+- atualiza o `status` do candidato no DB (sem precisar terminal)
+- a mensagem é editada com "✓ marcado como X" e os botões somem (sem duplo clique)
+- impede renotificação cross-scan da mesma oferta (mesmo se o Promobit reposta)
+
+O `watch` drena callbacks pendentes a cada 30s. Quando rodar fora do `watch` (ex: cron isolado), use `bugfinder tg-pull` pra processar manualmente.
+
 Pra rodar em background no Windows: cria task no **Agendador de Tarefas** apontando pra `.\.venv\Scripts\python.exe -m bugfinder watch` com a pasta do projeto como working dir.
 
 ## Deploy 24/7 na Railway (cloud)
@@ -251,6 +263,14 @@ Railway tem plano **Hobby ($5/mês fixo)** com bastante crédito. Esse container
 
 3. Candidato passa se `score >= MIN_SCORE`.
 
+### Histórico de preço (Fase 6)
+
+A cada scan, o preço da oferta é gravado em `price_history`. Para candidatos com `count >= 5` nos últimos 30 dias:
+- **Outlier baixo** (`price ≤ P10`): score recebe **+0.10** e reason "outlier histórico". Sinal mais forte que `old_price` (que pode estar inflado).
+- **Preço normalmente baixo** (`price ≥ P50`): score recebe **−0.05** e reason "old_price pode estar inflado". Reduz falsos positivos.
+
+Outlier verdadeiro vai aparecer no Telegram com 📉 *outlier histórico (mín R$ X em N obs)*. Quando o preço atual está acima da mediana histórica, a mensagem traz ⚠️ alertando que o `old_price` pode ser fake.
+
 ### Enrichment (Fase 2)
 
 Para cada candidato:
@@ -277,15 +297,19 @@ Usa P25 (não mediana) como preço de venda esperado — postura conservadora.
 src/bugfinder/
 ├── cli.py              # entrypoint
 ├── config.py           # leitura de .env
-├── models.py           # Offer, Candidate, MarketReference, Viability
-├── scanner.py          # orquestração: coleta -> detect -> enrich -> persist
+├── models.py           # Offer, Candidate, MarketReference, Viability, PriceHistoryStats
+├── scanner.py          # orquestração: coleta -> detect -> hist -> enrich ML -> persist
 ├── detector.py         # filtros + score (Fase 1)
 ├── enricher.py         # ML lookup + viabilidade (Fase 2)
 ├── matcher.py          # clean_title + busca no ML
 ├── viability.py        # cálculo de margem/ROI
-├── storage.py          # SQLite (scans, offers, candidates)
+├── storage.py          # SQLite (scans, offers, candidates, price_history)
+├── watch.py            # loop 24/7 + drain de callbacks Telegram
 ├── auth/
 │   └── ml_oauth.py     # OAuth2 client_credentials + cache
+├── notifier/
+│   ├── telegram.py     # bot API + inline keyboards
+│   └── callbacks.py    # processa cliques em botões → status no DB
 └── sources/
     ├── base.py         # Source ABC
     ├── promobit.py     # scrape de __NEXT_DATA__

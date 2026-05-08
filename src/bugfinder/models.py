@@ -82,6 +82,18 @@ class Viability(BaseModel):
         return self.margin_brl > 0
 
 
+class PriceHistoryStats(BaseModel):
+    """Resumo do histórico de preço do mesmo (source, external_id)."""
+    count: int
+    min: float
+    max: float
+    p10: float
+    p25: float
+    p50: float
+    p75: float
+    is_outlier: bool = False  # True se preço atual <= P10 e count >= 5
+
+
 class Candidate(BaseModel):
     """Uma offer marcada como candidata pelo detector + enrichment opcional."""
     offer: Offer
@@ -91,6 +103,9 @@ class Candidate(BaseModel):
     # Enrichment Fase 2 (opcional — None se ML não está configurado ou não achou match)
     market_reference: MarketReference | None = None
     viability: Viability | None = None
+
+    # Enrichment histórico (opcional — None se < 2 pontos de histórico)
+    history: PriceHistoryStats | None = None
 
     @property
     def discount_pct(self) -> float:
