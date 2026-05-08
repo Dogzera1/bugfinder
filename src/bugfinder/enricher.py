@@ -141,12 +141,17 @@ class Enricher:
             try:
                 query = clean_title(c.offer.title)
                 if query:
+                    # Valida contra a query LIMPA, não o título original cheio de
+                    # marketing — senão o overlap fica artificialmente baixo
+                    # porque o título original tem 20+ tokens e o título do ML
+                    # tem só 6-7. min_matches=2 pra aceitar produtos menos
+                    # populares (P25 ainda é razoável com 2 preços).
                     raw = self._ml.reference_price(
                         query,
-                        validate_against=c.offer.title,
+                        validate_against=query,
                         top_n=25,
                         min_overlap=0.5,
-                        min_matches=3,
+                        min_matches=2,
                     )
                     if raw:
                         ref = MarketReference(**raw)
