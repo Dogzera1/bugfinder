@@ -25,3 +25,6 @@ build/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Investigação local (HTMLs de scrape, etc)
+.tmp/

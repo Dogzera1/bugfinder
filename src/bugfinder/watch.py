@@ -184,13 +184,16 @@ def _do_cycle(opts: WatchOptions, storage: Storage,
         )
 
     # Em modo "ML desligado" (config) ou ML quebrado neste ciclo, filtra
-    # por discount em vez de ROI.
+    # por discount em vez de ROI. Em ambos os modos, dropa candidates com
+    # benchmark cross-loja indicando old_price totalmente inflado
+    # (real_discount<5%) — esses são bait declarado pela própria loja.
     if not CONFIG.enable_ml_lookup or ml_broken_this_cycle:
         rows = storage.list_unnotified(
             min_discount_pct=CONFIG.min_discount_pct_notify,
             require_viability=False,
             min_roi_pct=None,
             min_match_confidence=None,
+            max_inflated_real_discount=CONFIG.min_real_discount_pct,
             limit=opts.max_notifications_per_cycle,
         )
     else:
@@ -198,6 +201,7 @@ def _do_cycle(opts: WatchOptions, storage: Storage,
             min_roi_pct=opts.min_roi_pct,
             min_match_confidence=opts.min_match_confidence,
             require_viability=opts.notify_only_with_roi,
+            max_inflated_real_discount=CONFIG.min_real_discount_pct,
             limit=opts.max_notifications_per_cycle,
         )
     if not rows:

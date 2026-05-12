@@ -94,6 +94,22 @@ class PriceHistoryStats(BaseModel):
     is_outlier: bool = False  # True se preço atual <= P10 e count >= 5
 
 
+class BenchmarkReference(BaseModel):
+    """
+    Estatísticas de preço cruzadas de uma ou mais lojas externas
+    (NÃO marketplace), pra detectar old_price inflado.
+    Hoje só Kabum; arquitetura aceita N sources futuras.
+    """
+    query_used: str
+    median_brl: float
+    p25_brl: float
+    p75_brl: float
+    count: int                       # total de preços agregados
+    sources_used: list[str]          # ['kabum', ...]
+    match_confidence: float = 0.0    # 0..1, overlap médio com query
+    real_discount_pct: float | None = None  # (median - offer.price) / median * 100
+
+
 class Candidate(BaseModel):
     """Uma offer marcada como candidata pelo detector + enrichment opcional."""
     offer: Offer
@@ -106,6 +122,9 @@ class Candidate(BaseModel):
 
     # Enrichment histórico (opcional — None se < 2 pontos de histórico)
     history: PriceHistoryStats | None = None
+
+    # Benchmark cross-loja (opcional — None se sem dados)
+    benchmark: BenchmarkReference | None = None
 
     @property
     def discount_pct(self) -> float:

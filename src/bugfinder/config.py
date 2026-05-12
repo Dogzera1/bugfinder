@@ -61,6 +61,11 @@ class Config:
     )
     # Discount % mínimo pra notificar quando ML lookup está off
     min_discount_pct_notify: float = _float("MIN_DISCOUNT_PCT_NOTIFY", 35.0)
+    # Real discount % mínimo medido contra benchmark cross-loja (Kabum).
+    # Candidates com bench_real_discount_pct < esse valor são tratados como
+    # "old_price totalmente inflado" e dropados antes de notificar.
+    # Candidates sem dados cross-loja (categoria não-tech) passam.
+    min_real_discount_pct: float = _float("MIN_REAL_DISCOUNT_PCT", 5.0)
 
     # --- Telegram (Fase 5) ---
     telegram_bot_token: str | None = os.getenv("TELEGRAM_BOT_TOKEN") or None

@@ -115,7 +115,8 @@ def run_scan(
                         "init_error": enr.init_error,
                         "n_candidates": len(candidates),
                     })
-                candidates, enrich_stats = enr.enrich(candidates)
+                candidates, enrich_stats = enr.enrich(candidates,
+                                                       storage=storage)
                 if on_progress:
                     on_progress("enrich_done", enrich_stats)
         except Exception as e:

@@ -94,6 +94,21 @@ CREATE INDEX IF NOT EXISTS idx_price_history_sku_ts
     ON price_history(source, external_id, ts);
 CREATE INDEX IF NOT EXISTS idx_price_history_ts
     ON price_history(ts);
+
+-- Cache 24h do benchmark cross-loja por query (chave = sha1 do título normalizado).
+-- count=0 marca "tentei e não achou" pra não retentar dentro da TTL.
+CREATE TABLE IF NOT EXISTS benchmark_cache (
+    query_hash       TEXT    PRIMARY KEY,
+    query_used       TEXT    NOT NULL,
+    median_brl       REAL,
+    p25_brl          REAL,
+    p75_brl          REAL,
+    count            INTEGER NOT NULL,
+    sources_json     TEXT,
+    match_confidence REAL,
+    ts               TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_benchmark_cache_ts ON benchmark_cache(ts);
 """
 
 # Migrações idempotentes pra DBs antigos — rodam ANTES do executescript
@@ -116,6 +131,12 @@ _MIGRATIONS = [
     "ALTER TABLE candidates ADD COLUMN hist_p50 REAL",
     "ALTER TABLE candidates ADD COLUMN hist_min REAL",
     "ALTER TABLE candidates ADD COLUMN hist_is_outlier INTEGER",
+    # Benchmark cross-loja (Fase 6)
+    "ALTER TABLE candidates ADD COLUMN bench_median REAL",
+    "ALTER TABLE candidates ADD COLUMN bench_count INTEGER",
+    "ALTER TABLE candidates ADD COLUMN bench_real_discount_pct REAL",
+    "ALTER TABLE candidates ADD COLUMN bench_badge TEXT",
+    "ALTER TABLE candidates ADD COLUMN bench_sources_json TEXT",
 ]
 
 # Índices que dependem de colunas adicionadas pelas migrações.
@@ -316,6 +337,13 @@ class Storage:
             mr = c.market_reference
             via = c.viability
             h = c.history
+            bm = c.benchmark
+            # badge é derivado em tempo de notificação a partir de real_discount;
+            # persiste pra consulta posterior + debug.
+            bench_badge = None
+            if bm is not None and bm.real_discount_pct is not None:
+                from .benchmark import classify_real_discount
+                bench_badge = classify_real_discount(bm.real_discount_pct)
             rows.append((
                 scan_id, c.offer.source, c.offer.external_id,
                 c.score, c.offer.discount_pct,
@@ -336,6 +364,11 @@ class Storage:
                 h.p50 if h else None,
                 h.min if h else None,
                 int(h.is_outlier) if h else None,
+                bm.median_brl if bm else None,
+                bm.count if bm else None,
+                bm.real_discount_pct if bm else None,
+                bench_badge,
+                json.dumps(bm.sources_used, ensure_ascii=False) if bm else None,
             ))
         if not rows:
             return 0
@@ -347,8 +380,11 @@ class Storage:
                         ml_query, ml_median, ml_p25, ml_p75, ml_count, ml_search_url,
                         ml_match_confidence,
                         via_sale_price, via_acquisition, via_margin_brl, via_roi_pct,
-                        hist_count, hist_p10, hist_p50, hist_min, hist_is_outlier)
-                   VALUES (?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?)""",
+                        hist_count, hist_p10, hist_p50, hist_min, hist_is_outlier,
+                        bench_median, bench_count, bench_real_discount_pct,
+                        bench_badge, bench_sources_json)
+                   VALUES (?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,
+                           ?,?,?,?,?)""",
                 rows,
             )
         return len(rows)
@@ -404,12 +440,19 @@ class Storage:
     def list_unnotified(self, *, min_roi_pct: float | None = None,
                         min_match_confidence: float | None = None,
                         min_discount_pct: float | None = None,
+                        max_inflated_real_discount: float | None = None,
                         require_viability: bool = True,
                         limit: int = 50) -> list[sqlite3.Row]:
         """
         Candidatos ainda não notificados via Telegram.
         Filtros: ROI mínimo, match confidence mínimo, desconto mínimo (fallback
         sem ROI), exige cálculo de viabilidade.
+
+        max_inflated_real_discount: se setado, filtra fora candidates com
+        bench_real_discount_pct < esse valor (i.e. old_price totalmente
+        inflado: a mediana cross-loja mostra que o "desconto" é falso).
+        Candidates sem dados cross-loja (bench_real_discount_pct NULL)
+        passam — não temos como dizer que é fake.
 
         Dedup cross-scan por (source, external_id):
           - exclui se algum candidate anterior já foi notificado
@@ -421,6 +464,8 @@ class Storage:
                    c.via_sale_price, c.ml_search_url, c.ml_match_confidence,
                    c.ml_p25, c.ml_count,
                    c.hist_count, c.hist_p10, c.hist_p50, c.hist_min, c.hist_is_outlier,
+                   c.bench_median, c.bench_count, c.bench_real_discount_pct,
+                   c.bench_badge, c.bench_sources_json,
                    o.source, o.external_id, o.title, o.url, o.price, o.old_price,
                    o.store_name, o.coupon_code
             FROM candidates c
@@ -447,6 +492,11 @@ class Storage:
         if min_discount_pct is not None:
             sql += " AND c.discount_pct >= ?"
             params.append(min_discount_pct)
+        if max_inflated_real_discount is not None:
+            # mantém candidates sem dados (NULL) — só dropa os comprovadamente fake
+            sql += (" AND (c.bench_real_discount_pct IS NULL"
+                    "      OR c.bench_real_discount_pct >= ?)")
+            params.append(max_inflated_real_discount)
         # Garante que cada (source, external_id) aparece só uma vez (o mais recente)
         sql += """
             AND c.id IN (
@@ -460,6 +510,57 @@ class Storage:
         params.append(limit)
         with self._connect() as conn:
             return list(conn.execute(sql, params).fetchall())
+
+    # --- benchmark cache ---
+
+    def read_benchmark_cache(self, query_hash: str,
+                             cutoff_iso: str) -> sqlite3.Row | None:
+        """Retorna a linha do cache se ts >= cutoff_iso; senão None."""
+        with self._connect() as conn:
+            return conn.execute(
+                """SELECT query_used, median_brl, p25_brl, p75_brl, count,
+                          sources_json, match_confidence, ts
+                   FROM benchmark_cache
+                   WHERE query_hash = ? AND ts >= ?""",
+                (query_hash, cutoff_iso),
+            ).fetchone()
+
+    def write_benchmark_cache(self, *, query_hash: str, query_used: str,
+                              median: float | None, p25: float | None,
+                              p75: float | None, count: int,
+                              sources: list[str],
+                              match_confidence: float) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO benchmark_cache (
+                       query_hash, query_used, median_brl, p25_brl, p75_brl,
+                       count, sources_json, match_confidence, ts
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(query_hash) DO UPDATE SET
+                       query_used = excluded.query_used,
+                       median_brl = excluded.median_brl,
+                       p25_brl = excluded.p25_brl,
+                       p75_brl = excluded.p75_brl,
+                       count = excluded.count,
+                       sources_json = excluded.sources_json,
+                       match_confidence = excluded.match_confidence,
+                       ts = excluded.ts""",
+                (query_hash, query_used, median, p25, p75, count,
+                 json.dumps(sources, ensure_ascii=False),
+                 match_confidence, _now_iso()),
+            )
+
+    def purge_benchmark_cache(self, *, older_than_hours: int = 168) -> int:
+        """Limpa cache antigo. Default: 7 dias (cache válido é 24h, mas
+        manter histórico ajuda em rebuild rápido)."""
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(hours=older_than_hours)).isoformat(timespec="seconds")
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "DELETE FROM benchmark_cache WHERE ts < ?", (cutoff,),
+            )
+            return cur.rowcount
 
     def mark_notified(self, candidate_ids: list[int]) -> None:
         """

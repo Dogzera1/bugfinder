@@ -166,6 +166,37 @@ class TelegramNotifier:
                 extra += f"  \\(match {match_conf*100:.0f}%\\)"
             lines.append(extra)
 
+        # Benchmark cross-loja: badge de veracidade do desconto declarado
+        try:
+            bench_median = c["bench_median"]
+            bench_count = c["bench_count"]
+            bench_real = c["bench_real_discount_pct"]
+            bench_badge = c["bench_badge"]
+            bench_sources = c["bench_sources_json"]
+        except (IndexError, KeyError):
+            bench_median = bench_count = bench_real = bench_badge = bench_sources = None
+        if bench_median and bench_count:
+            real_str = (f"{bench_real:+.0f}%" if bench_real is not None else "—")
+            sources = "Kabum"  # hoje só Kabum; quando crescer, parse de bench_sources
+            if bench_badge == "real_deal":
+                bline = (f"🔥 *desconto real* {_escape_md(real_str)} vs "
+                         f"{sources} \\({bench_count} obs, "
+                         f"mediana {_escape_md(_fmt_brl(bench_median))}\\)")
+            elif bench_badge == "soft":
+                bline = (f"⚠️ old\\_price levemente inflado: real "
+                         f"{_escape_md(real_str)} vs {sources} "
+                         f"\\({bench_count} obs, mediana "
+                         f"{_escape_md(_fmt_brl(bench_median))}\\)")
+            elif bench_badge == "inflated":
+                bline = (f"❌ old\\_price *muito inflado* — pre\\u00e7o ofertado "
+                         f"é próximo da mediana real "
+                         f"\\({_escape_md(_fmt_brl(bench_median))}\\)")
+            else:
+                bline = (f"📊 mediana {sources}: "
+                         f"{_escape_md(_fmt_brl(bench_median))} "
+                         f"\\({bench_count} obs\\)")
+            lines.append(bline)
+
         # Sinal de histórico — só aparece quando temos dados (>=2 pontos)
         try:
             hist_count = c["hist_count"]

@@ -16,10 +16,12 @@ import os
 from typing import Iterable
 
 from .auth import MLOAuthClient, NoMLCredentialsError
+from .benchmark import benchmark_lookup
 from .config import Config
 from .matcher import clean_title
 from .models import Candidate, MarketReference
 from .sources.ml_browser import MercadoLivreBrowser
+from .storage import Storage
 from .viability import compute_viability
 
 
@@ -112,19 +114,24 @@ class Enricher:
     def __exit__(self, *exc):
         self.close()
 
-    def enrich(self, candidates: Iterable[Candidate]) -> tuple[list[Candidate], dict]:
+    def enrich(self, candidates: Iterable[Candidate],
+               storage: Storage | None = None) -> tuple[list[Candidate], dict]:
         """
         Devolve (candidatos_enriquecidos, stats).
-        stats: {n_total, n_with_ref, n_profitable, errors}
+        stats: {n_total, n_with_ref, n_profitable, errors, n_bench, n_bench_inflated}
+
+        storage: opcional. Passar pra ativar o cache 24h do benchmark cross-loja.
         """
         out: list[Candidate] = []
-        stats = {"n_total": 0, "n_with_ref": 0, "n_profitable": 0, "errors": 0}
+        stats = {"n_total": 0, "n_with_ref": 0, "n_profitable": 0, "errors": 0,
+                 "n_bench": 0, "n_bench_inflated": 0}
 
         if not self._ml:
             stats["skipped_reason"] = self._init_error or "ML não inicializado"
+            # Mesmo sem ML, ainda rodamos benchmark — ele é independente.
             for c in candidates:
-                out.append(c)
                 stats["n_total"] += 1
+                out.append(self._add_benchmark(c, storage, stats))
             return out, stats
 
         # Limita enrichment pra evitar OOM/timeouts em deploys com pouca RAM
@@ -174,16 +181,43 @@ class Enricher:
                 if via.margin_brl > 0:
                     stats["n_profitable"] += 1
 
-            out.append(c.model_copy(update={
+            enriched = c.model_copy(update={
                 "market_reference": ref,
                 "viability": via,
-            }))
+            })
+            out.append(self._add_benchmark(enriched, storage, stats))
 
         # candidatos pulados por max_enrich entram sem reference/viability
+        # (mas com benchmark, que é leve)
         for c in to_skip:
             stats["n_total"] += 1
-            out.append(c)
+            out.append(self._add_benchmark(c, storage, stats))
         if to_skip:
             stats["skipped_by_cap"] = len(to_skip)
 
         return out, stats
+
+    def _add_benchmark(self, c: Candidate, storage: Storage | None,
+                       stats: dict) -> Candidate:
+        """
+        Anota benchmark cross-loja no candidato. Fail silent.
+        Pula se a oferta original já é da Kabum (não tem sentido comparar
+        Kabum contra Kabum).
+        """
+        try:
+            ref = benchmark_lookup(
+                c.offer.title,
+                offer_price=c.offer.price,
+                storage=storage,
+                skip_source=c.offer.source,
+            )
+        except Exception as e:
+            print(f"[enricher] benchmark erro: {type(e).__name__}: {e}",
+                  flush=True)
+            return c
+        if ref is None:
+            return c
+        stats["n_bench"] += 1
+        if ref.real_discount_pct is not None and ref.real_discount_pct < 5.0:
+            stats["n_bench_inflated"] += 1
+        return c.model_copy(update={"benchmark": ref})
