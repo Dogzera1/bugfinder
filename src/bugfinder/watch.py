@@ -167,8 +167,25 @@ def _do_cycle(opts: WatchOptions, storage: Storage,
            if es.get("skipped_reason") else "")
     )
 
-    # Em modo "ML desligado", filtra por discount em vez de ROI
-    if not CONFIG.enable_ml_lookup:
+    # Auto-fallback: se ML está ligado mas rodou e não conseguiu NENHUMA
+    # referência (proxy down, bloqueio, etc), cai pra discount-only neste
+    # ciclo. Sem isso, todo ciclo retorna "nada novo" enquanto o ML está
+    # quebrado — e o usuário fica sem notificações sem perceber.
+    ml_broken_this_cycle = (
+        CONFIG.enable_ml_lookup
+        and es.get("n_total", 0) > 0
+        and es.get("n_with_ref", 0) == 0
+    )
+    if ml_broken_this_cycle:
+        console.print(
+            "  [yellow]⚠ ML retornou 0 referências em "
+            f"{es.get('n_total', 0)} candidatos — usando discount-only "
+            f"neste ciclo (verificar proxy / bloqueio do ML).[/yellow]"
+        )
+
+    # Em modo "ML desligado" (config) ou ML quebrado neste ciclo, filtra
+    # por discount em vez de ROI.
+    if not CONFIG.enable_ml_lookup or ml_broken_this_cycle:
         rows = storage.list_unnotified(
             min_discount_pct=CONFIG.min_discount_pct_notify,
             require_viability=False,
