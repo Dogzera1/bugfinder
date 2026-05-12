@@ -79,13 +79,7 @@ def _extract_products(html: str) -> list[ProductHit]:
     return out
 
 
-def search(query: str, *, timeout: float = 15.0) -> list[ProductHit]:
-    """
-    Busca produtos no Kabum. Devolve lista vazia em qualquer erro
-    (não-existência da rota, bot wall, parse fail, timeout) — fail silent.
-    """
-    if not query or not query.strip():
-        return []
+def _fetch_once(query: str, timeout: float) -> list[ProductHit]:
     url = f"https://www.kabum.com.br/busca/{_slug(query)}"
     try:
         with httpx.Client(headers=_HEADERS, timeout=timeout,
@@ -96,3 +90,25 @@ def search(query: str, *, timeout: float = 15.0) -> list[ProductHit]:
         return _extract_products(r.text)
     except Exception:
         return []
+
+
+def search(query: str, *, timeout: float = 15.0) -> list[ProductHit]:
+    """
+    Busca produtos no Kabum. Devolve lista vazia em qualquer erro
+    (não-existência da rota, bot wall, parse fail, timeout) — fail silent.
+
+    Se a query longa retorna 0 hits, tenta de novo com os 3 primeiros tokens
+    (Kabum cadastra produtos com nome curto tipo "Monitor LG UltraGear",
+    sem specs detalhadas como "32 Quad HD VA 165Hz" que o Promobit põe no
+    título).
+    """
+    if not query or not query.strip():
+        return []
+    hits = _fetch_once(query, timeout)
+    if hits:
+        return hits
+    tokens = query.split()
+    if len(tokens) > 3:
+        short = " ".join(tokens[:3])
+        return _fetch_once(short, timeout)
+    return []

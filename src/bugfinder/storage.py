@@ -498,13 +498,22 @@ class Storage:
                     "      OR c.bench_real_discount_pct >= ?)")
             params.append(max_inflated_real_discount)
         # Garante que cada (source, external_id) aparece só uma vez (o mais recente)
+        # Ordering:
+        #   1) bench_badge='real_deal' primeiro (validado cross-loja)
+        #   2) ROI (quando disponível — NULLs ficam por último em DESC no SQLite)
+        #   3) score (discount-only fallback)
+        # Isso evita que tech com benchmark fique fora do top-N por causa de
+        # moda/beleza ter discount declarado maior.
         sql += """
             AND c.id IN (
                 SELECT MAX(id) FROM candidates
                 WHERE notified_at IS NULL AND status = 'new'
                 GROUP BY source, external_id
             )
-            ORDER BY c.via_roi_pct DESC, c.score DESC
+            ORDER BY
+                CASE c.bench_badge WHEN 'real_deal' THEN 0 ELSE 1 END,
+                c.via_roi_pct DESC,
+                c.score DESC
             LIMIT ?
         """
         params.append(limit)
