@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .benchmark import benchmark_lookup
 from .config import CONFIG, Config
 from .detector import detect_candidates
 from .enricher import Enricher
@@ -127,6 +128,14 @@ def run_scan(
             enrich_stats = {"skipped_reason": f"crash: {e}"}
         print(f"[scan] enrichment concluído: {enrich_stats}", flush=True)
 
+    # Benchmark cross-loja (Fase 6) — INDEPENDENTE do ML lookup.
+    # Roda sempre, inclusive em modo ENABLE_ML_LOOKUP=0 (que é cenário comum
+    # em cloud). É leve (httpx + cache 24h) então não custa caro.
+    if candidates:
+        bench_stats = _apply_benchmark(candidates, storage)
+        enrich_stats["benchmark"] = bench_stats
+        print(f"[scan] benchmark cross-loja: {bench_stats}", flush=True)
+
     # Filtro pós-enrichment por ROI mínimo (se configurado)
     if config.min_roi_pct > 0:
         before = len(candidates)
@@ -160,6 +169,41 @@ def run_scan(
         scan_id=scan_id, offers=all_offers, candidates=candidates,
         errors=errors, enrich_stats=enrich_stats,
     )
+
+
+def _apply_benchmark(candidates: list[Candidate],
+                     storage: Storage) -> dict:
+    """
+    Anota benchmark cross-loja em cada candidato (in-place via model_copy).
+    Fail silent: se a busca falha pra um candidato, ele segue sem benchmark.
+    Cache 24h amortiza re-buscas da mesma query.
+    """
+    stats = {"n_total": len(candidates), "n_with_bench": 0,
+             "n_inflated": 0, "n_real_deal": 0, "errors": 0}
+    for i, c in enumerate(candidates):
+        try:
+            ref = benchmark_lookup(
+                c.offer.title,
+                offer_price=c.offer.price,
+                storage=storage,
+                skip_source=c.offer.source,
+            )
+        except Exception as e:
+            stats["errors"] += 1
+            print(f"[scan] benchmark erro #{i}: {type(e).__name__}: {e}",
+                  flush=True)
+            continue
+        if ref is None:
+            continue
+        stats["n_with_bench"] += 1
+        if ref.real_discount_pct is not None:
+            if ref.real_discount_pct >= 25.0:
+                stats["n_real_deal"] += 1
+            elif ref.real_discount_pct < 5.0:
+                stats["n_inflated"] += 1
+        # model_copy não funciona in-place; precisa substituir no list
+        candidates[i] = c.model_copy(update={"benchmark": ref})
+    return stats
 
 
 def _enrich_with_history(
